@@ -15,7 +15,7 @@ TRUCK_WEIGHT_CAPACITY_MULTIPLIER = 1.5
 TRUCK_SPEED_MPS = 60 * 1000 / 3600  # 60 km/h to meters/second
 SERVICE_TIME_SECONDS = 30 * 60  # 30 minutes
 N_ANTS = 1
-N_ITERATIONS = 2
+N_ITERATIONS = 1
 ALPHA = 1.0
 BETA = 2.0
 RHO = 0.1
@@ -30,8 +30,8 @@ class Data:
         self.area_multiplier = area_multiplier
         self.weight_multiplier = weight_multiplier
         try:
-            self.distance = pd.read_csv("distance.csv")
-            self.order = pd.read_csv("order_large.csv")
+            self.distance = pd.read_csv(distance_file)
+            self.order = pd.read_csv(order_file)
         except FileNotFoundError as e:
             st.write(f"Error: File not found. {e}")
             st.write("Please ensure the file paths are correct.")
@@ -43,15 +43,14 @@ class Data:
         self.orders_processed = self._process_orders()
         self.truck_area_cap = self.orders_processed['Total_Area'].max() * self.area_multiplier
         self.truck_weight_cap = self.orders_processed['Total_Weight'].max() * self.weight_multiplier
+        self.metadata = self._create_metadata()
 
     def _extract_cities(self):
-        # Extract cities from order sources and destinations, adding the depot
         cities = pd.unique(self.order[["Source", "Destination"]].values.ravel("K"))
         cities = sorted(set(cities) | {self.depot_city})
         return cities
 
     def _matrix(self):
-        # Create distance matrix
         matrix = np.full((len(self.cities), len(self.cities)), np.inf)
         for _, row in self.distance.iterrows():
             src, dst, dist = row["Source"], row["Destination"], row["Distance(M)"]
@@ -59,11 +58,10 @@ class Data:
                 i, j = self.city_to_index[src], self.city_to_index[dst]
                 matrix[i, j] = dist
                 matrix[j, i] = dist
-        np.fill_diagonal(matrix, 0)  # Distance from a city to itself = 0
+        np.fill_diagonal(matrix, 0)
         return matrix
 
     def _process_orders(self):
-        # Process orders
         orders_df = self.order.copy()
         orders_df['Available_Time'] = pd.to_datetime(orders_df['Available_Time'])
         orders_df['Deadline'] = pd.to_datetime(orders_df['Deadline'])
@@ -86,8 +84,28 @@ class Data:
             orders_processed['Item_Count'] = 1
         return orders_processed
 
+    def _create_metadata(self):
+        metadata = pd.DataFrame(index=range(len(self.cities)))
+        metadata['Urgency'] = 1.0
+        metadata['Weight'] = 0.0
+        
+        # Calculate urgency based on deadlines and available times
+        for _, order in self.orders_processed.iterrows():
+            source_idx = self.city_to_index[order['Source']]
+            dest_idx = self.city_to_index[order['Destination']]
+            
+            time_window = (order['Deadline'] - order['Available_Time']).total_seconds()
+            urgency = 1.0 / (time_window + 1e-3)  # Add small constant to avoid division by zero
+            
+            metadata.loc[source_idx, 'Urgency'] = max(metadata.loc[source_idx, 'Urgency'], urgency)
+            metadata.loc[dest_idx, 'Urgency'] = max(metadata.loc[dest_idx, 'Urgency'], urgency)
+            
+            metadata.loc[source_idx, 'Weight'] += order['Total_Weight']
+            metadata.loc[dest_idx, 'Weight'] += order['Total_Weight']
+        
+        return metadata
+
     def get_distance(self, city1, city2):
-        # Get distance between two cities
         if city1 == city2:
             return 0
         try:
@@ -99,7 +117,6 @@ class Data:
             return float('inf')
 
     def preview(self):
-        # Preview data
         st.title("Data Preview")
         st.write(f"Number of cities: {len(self.cities)}")
         st.write(f"Distance matrix shape: {self.distance_matrix.shape}")
@@ -107,26 +124,158 @@ class Data:
         st.write(f"Truck weight capacity: {self.truck_weight_cap:.2f}")
         st.header("Processed orders:\n")
         st.write(self.orders_processed)
+        st.header("Metadata:\n")
+        st.write(self.metadata)
         df = pd.DataFrame(self.distance_matrix, index=self.cities, columns=self.cities)
         st.header("Distance matrix preview:\n")
         st.write(df.round(0))
 
     def visualize_network(self):
-        # Visualize network using networkx
         G = nx.Graph()
         for i, city1 in enumerate(self.cities):
             for j, city2 in enumerate(self.cities):
                 if i < j and self.distance_matrix[i, j] != np.inf:
-                    G.add_edge(city1, city2, weight=self.distance_matrix[i, j] / 1000)  # In kilometers
-        plt.figure(figsize=(10, 8))
-        pos = nx.spring_layout(G)
-        nx.draw(G, pos, with_labels=True, node_color='lightblue', node_size=500, font_size=10, 
-                edge_color='gray', width=1)  # أضفنا edge_color وwidth هنا
-        labels = nx.get_edge_attributes(G, 'weight')
-        nx.draw_networkx_edge_labels(G, pos, edge_labels=labels)  # استخدمنا دالة جديدة لأسماء الخطوط
+                    G.add_edge(city1, city2, weight=self.distance_matrix[i, j] / 1000)
+        plt.figure(figsize=(15, 12))
+        pos = nx.spring_layout(G, k=1, iterations=50)
+        nx.draw_networkx_nodes(G, pos, node_color='lightblue', node_size=500, alpha=0.6)
+        edge_weights = [G[u][v]['weight'] for u, v in G.edges()]
+        max_weight = max(edge_weights)
+        edge_widths = [2 * (w/max_weight) for w in edge_weights]
+        nx.draw_networkx_edges(G, pos, width=edge_widths, alpha=0.4)
+        nx.draw_networkx_labels(G, pos, font_size=8, bbox=dict(facecolor='white', alpha=0.7))
         plt.title("Cities and Distances Network (in Kilometers)")
-        plt.savefig('cities_network.png')
+        plt.axis('off')
+        plt.tight_layout()
+        plt.savefig('cities_network.png', dpi=300, bbox_inches='tight')
         st.write("Network saved as 'cities_network.png'")
+
+class AntColonyOptimizer:
+    def __init__(self, distance_matrix, metadata=None, num_ants=30, num_iterations=200, alpha=1.0, beta=2.0, rho=0.5):
+        self.distances = distance_matrix
+        self.pheromones = np.ones_like(distance_matrix)
+        self.metadata = metadata
+        self.num_ants = num_ants
+        self.num_iterations = num_iterations
+        self.alpha = alpha
+        self.beta = beta
+        self.rho = rho
+        self.num_cities = distance_matrix.shape[0]
+        # Find the index of City_61 in the cities list
+        self.depot = 61  # This should match the index of City_61 in your cities list
+
+    def _get_penalty(self, city_idx):
+        if self.metadata is None or city_idx not in self.metadata.index:
+            return 1.0
+        urgency = self.metadata.loc[city_idx, 'Urgency']
+        weight = self.metadata.loc[city_idx, 'Weight']
+        penalty = (1.0 / (urgency + 1e-3)) + (weight / 1e7)
+        return penalty
+
+    def _calculate_probabilities(self, current_city, visited):
+        # Only allow visiting the depot at the start and end
+        if current_city == self.depot:
+            allowed = [i for i in range(self.num_cities) if i not in visited]
+        else:
+            allowed = [i for i in range(self.num_cities) if i not in visited and i != self.depot]
+        
+        probs = np.zeros(self.num_cities)
+
+        for j in allowed:
+            tau = self.pheromones[current_city][j] ** self.alpha
+            eta = (1.0 / self.distances[current_city][j]) ** self.beta
+            penalty = self._get_penalty(j)
+            probs[j] = tau * eta * penalty
+
+        total = np.sum(probs)
+        return probs / total if total > 0 else np.ones(self.num_cities) / self.num_cities
+
+    def _construct_solution(self):
+        route = [self.depot]  # Start at depot (City_61)
+        visited = set(route)
+        total_distance = 0
+        current = self.depot
+
+        while len(visited) < self.num_cities:
+            probs = self._calculate_probabilities(current, visited)
+            next_city = np.random.choice(range(self.num_cities), p=probs)
+
+            if next_city in visited:
+                continue
+
+            visited.add(next_city)
+            route.append(next_city)
+            total_distance += self.distances[current][next_city]
+            current = next_city
+
+        # Return to depot
+        total_distance += self.distances[current][self.depot]
+        route.append(self.depot)
+
+        return route, total_distance
+
+    def run(self):
+        best_route = None
+        best_distance = float('inf')
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+
+        for iteration in range(self.num_iterations):
+            status_text.text(f"Iteration {iteration + 1}/{self.num_iterations}")
+            routes = []
+            distances = []
+
+            for _ in range(self.num_ants):
+                route, dist = self._construct_solution()
+                routes.append(route)
+                distances.append(dist)
+
+            min_idx = np.argmin(distances)
+            if distances[min_idx] < best_distance:
+                best_distance = distances[min_idx]
+                best_route = routes[min_idx]
+
+            # Evaporate pheromones
+            self.pheromones *= (1 - self.rho)
+
+            # Reinforce best path
+            for i in range(len(best_route) - 1):
+                a, b = best_route[i], best_route[i + 1]
+                self.pheromones[a][b] += 1.0 / best_distance
+
+            progress_bar.progress((iteration + 1) / self.num_iterations)
+            st.write(f"Iteration {iteration + 1}: Best distance = {best_distance/1000:.2f} km")
+
+        return best_route, best_distance
+
+def run_vrp(data, num_ants=30, num_iterations=200, alpha=1.0, beta=2.0, rho=0.5):
+    # Ensure City_61 is the depot
+    depot_idx = data.city_to_index[DEPOT_CITY]
+    
+    optimizer = AntColonyOptimizer(
+        distance_matrix=data.distance_matrix,
+        metadata=data.metadata,
+        num_ants=num_ants,
+        num_iterations=num_iterations,
+        alpha=alpha,
+        beta=beta,
+        rho=rho
+    )
+    
+    # Set the depot index
+    optimizer.depot = depot_idx
+    
+    best_route, best_distance = optimizer.run()
+    
+    # Convert route indices back to city names
+    route_cities = [data.index_to_city[idx] for idx in best_route]
+    
+    st.header("Best Route Found")
+    st.write(f"Total Distance: {best_distance/1000:.2f} km")
+    st.write("Optimized Route:")
+    st.write(" → ".join(route_cities))
+    
+    return route_cities, best_distance
 
 # Function to calculate travel time
 def calculate_travel_time(dist_meters):
@@ -174,6 +323,9 @@ def is_order_feasible(truck_current_weight, truck_current_area,
 # Function to run ACO algorithm
 def run_aco(orders, get_distance, all_locations, location_to_idx, idx_to_location,
             truck_area_cap, truck_weight_cap, n_ants, n_iterations, alpha, beta, rho, q, initial_pheromone):
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
     n_locations = len(all_locations)
     pheromone_matrix = np.full((n_locations, n_locations), initial_pheromone, dtype=float)
     np.fill_diagonal(pheromone_matrix, 0)
@@ -183,7 +335,14 @@ def run_aco(orders, get_distance, all_locations, location_to_idx, idx_to_locatio
 
     st.header("Starting ACO Iterations")
     for iteration in range(n_iterations):
+        status_text.text(f"Iteration {iteration + 1}/{n_iterations}")
         all_ants_solutions = []
+        
+        # Add randomization to initial pheromone values
+        if iteration == 0:
+            pheromone_matrix += np.random.uniform(0, 0.1, pheromone_matrix.shape)
+            np.fill_diagonal(pheromone_matrix, 0)
+
         for ant_idx in range(n_ants):
             ant_routes = []
             ant_total_distance = 0
@@ -241,8 +400,13 @@ def run_aco(orders, get_distance, all_locations, location_to_idx, idx_to_locatio
                         )
                         time_until_deadline_seconds = (pd.Timestamp(order_data['Deadline']) - est_finish_dest_time).total_seconds()
                         heuristic_urgency = 1.0 / (time_until_deadline_seconds + 1.0) if time_until_deadline_seconds > 0 else 1000.0
-                        heuristic_val = (heuristic_dist * 0.7) + (heuristic_urgency * 0.3)
-                        prob_val = (pheromone_val ** alpha) * (heuristic_val ** beta)
+                        
+                        # Modified heuristic calculation with more emphasis on distance
+                        heuristic_val = (heuristic_dist * 0.8) + (heuristic_urgency * 0.2)
+                        
+                        # Add some randomization to prevent getting stuck in local optima
+                        random_factor = np.random.uniform(0.9, 1.1)
+                        prob_val = (pheromone_val ** alpha) * (heuristic_val ** beta) * random_factor
                         probabilities.append(prob_val)
                         total_pheromone_heuristic += prob_val
 
@@ -340,13 +504,31 @@ def run_aco(orders, get_distance, all_locations, location_to_idx, idx_to_locatio
                         pheromone_matrix[idx1, idx2] += pheromone_deposit_val
                         pheromone_matrix[idx2, idx1] += pheromone_deposit_val
 
-        pheromone_matrix *= (1 - float(rho))
+        # Update pheromone evaporation
+        pheromone_matrix *= (1 - rho)
+        
+        # Add minimum pheromone threshold to prevent complete evaporation
+        min_pheromone = 0.1
+        pheromone_matrix = np.maximum(pheromone_matrix, min_pheromone)
+        
+        # Update pheromones for all ants
+        for ant_solution in all_ants_solutions:
+            if ant_solution['total_distance'] > 0 and ant_solution['total_distance'] != float('inf'):
+                pheromone_deposit_val = q / ant_solution['total_distance']
+                for route_detail in ant_solution['routes']:
+                    for i in range(len(route_detail['path_cities']) - 1):
+                        idx1 = location_to_idx[route_detail['path_cities'][i]]
+                        idx2 = location_to_idx[route_detail['path_cities'][i+1]]
+                        pheromone_matrix[idx1, idx2] += pheromone_deposit_val
+                        pheromone_matrix[idx2, idx1] += pheromone_deposit_val
 
+        # Sort solutions for elite ant update
         iteration_solutions_sorted = sorted(all_ants_solutions, key=lambda s: (s['unserviced_orders'], s['total_distance']))
 
+        # Elite ant update (best solution of iteration)
         if iteration_solutions_sorted and iteration_solutions_sorted[0]['total_distance'] > 0 and iteration_solutions_sorted[0]['total_distance'] != float('inf'):
             best_iter_solution = iteration_solutions_sorted[0]
-            pheromone_deposit_val_elite = (q * 1.5) / best_iter_solution['total_distance']
+            pheromone_deposit_val_elite = (q * 2.0) / best_iter_solution['total_distance']  # Increased elite ant influence
             for route_detail in best_iter_solution['routes']:
                 for i in range(len(route_detail['path_cities']) - 1):
                     idx1 = location_to_idx[route_detail['path_cities'][i]]
@@ -364,5 +546,6 @@ def run_aco(orders, get_distance, all_locations, location_to_idx, idx_to_locatio
         best_dist_iter_str = f"{current_best_in_iteration['total_distance']/1000:.2f} km, Unserviced: {current_best_in_iteration['unserviced_orders']}" if current_best_in_iteration else "N/A"
         best_overall_dist_str = f"{best_overall_solution['total_distance']/1000:.2f} km, Unserviced: {best_overall_solution['unserviced_orders']}" if best_overall_solution['total_distance'] != float('inf') else "N/A"
         st.write(f"Iteration {iteration + 1}/{N_ITERATIONS} - Best in Iteration: {best_dist_iter_str} - Overall Best: {best_overall_dist_str}")
+        progress_bar.progress((iteration + 1) / n_iterations)
 
     return best_overall_solution

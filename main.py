@@ -15,8 +15,8 @@ TRUCK_AREA_CAPACITY_MULTIPLIER = 1.5
 TRUCK_WEIGHT_CAPACITY_MULTIPLIER = 1.5
 TRUCK_SPEED_MPS = 60 * 1000 / 3600  # 60 km/h to meters/second
 SERVICE_TIME_SECONDS = 30 * 60  # 30 minutes
-N_ANTS = 50
-N_ITERATIONS = 50
+N_ANTS = 1
+N_ITERATIONS = 1
 ALPHA = 1.0
 BETA = 2.0
 RHO = 0.1
@@ -105,29 +105,69 @@ def run(n_ants, n_iterations, alpha, beta, rho, Q, initial_pheromone, orders_dat
 # if run_button:
 #     run()
 
-st.title("Ant Colony Optimization")
+st.title("Vehicle Routing Problem with Ant Colony Optimization")
 
-form_data = {
-    "n_ants": None,
-    "n_iterations": None,
-    "alpha": None,
-    "beta": None,
-    "rho": None,
-    "Q": None,
-    "initial_pheromone": None,
-    "orders_dataset": None
-}
+# File paths
+DISTANCE_FILE_PATH = "distance.csv"
+ORDER_FILE_PATH = "order_large.csv"
 
+# Create form for parameters
 with st.form(key="run_form"):
-    form_data["n_ants"] = st.number_input("Number of ants", 3)
-    form_data["n_iterations"] = st.number_input("Number of iterations", 3)
-    form_data["alpha"] = st.number_input("Alpha", 1)
-    form_data["beta"] = st.number_input("Beta", 2)
-    form_data["rho"] = st.number_input("Pheromone evaporation rate", 0.1)
-    form_data["Q"] = st.number_input("Q", 100)
-    form_data["initial_pheromone"] = st.number_input("Initial pheromone matrix values", 1)
-    form_data["orders_dataset"] = st.selectbox("Choose orders dataset", ["order_large", "order_small"])
-    run_button = st.form_submit_button("Run")
+    st.subheader("ACO Parameters")
+    num_ants = st.number_input("Number of ants", min_value=1, max_value=100, value=30)
+    num_iterations = st.number_input("Number of iterations", min_value=1, max_value=500, value=200)
+    alpha = st.number_input("Alpha (pheromone influence)", min_value=0.1, max_value=5.0, value=1.0, step=0.1)
+    beta = st.number_input("Beta (heuristic influence)", min_value=0.1, max_value=5.0, value=2.0, step=0.1)
+    rho = st.number_input("Rho (evaporation rate)", min_value=0.1, max_value=0.9, value=0.5, step=0.1)
     
-    if run_button:
-        run(**form_data)
+    st.subheader("Dataset Selection")
+    orders_dataset = st.selectbox("Choose orders dataset", ["order_large.csv", "order_small.csv"])
+    
+    run_button = st.form_submit_button("Run Optimization")
+
+if run_button:
+    # Create Data object
+    data = Data(
+        distance_file=DISTANCE_FILE_PATH,
+        order_file=orders_dataset
+    )
+    
+    # Show data preview
+    st.write(f"Depot City: {DEPOT_CITY}")
+    data.preview()
+    data.visualize_network()
+    
+    # Run VRP optimization
+    route_cities, total_distance = run_vrp(
+        data=data,
+        num_ants=num_ants,
+        num_iterations=num_iterations,
+        alpha=alpha,
+        beta=beta,
+        rho=rho
+    )
+    
+    # Display results
+    st.header("Optimization Results")
+    st.write(f"Total Distance: {total_distance/1000:.2f} km")
+    st.write("Optimized Route:")
+    st.write(" → ".join(route_cities))
+    
+    # Create a DataFrame for the route details
+    route_details = []
+    for i in range(len(route_cities)-1):
+        from_city = route_cities[i]
+        to_city = route_cities[i+1]
+        distance = data.get_distance(from_city, to_city)
+        route_details.append({
+            'From': from_city,
+            'To': to_city,
+            'Distance (km)': distance/1000
+        })
+    
+    st.header("Route Details")
+    st.dataframe(pd.DataFrame(route_details))
+    
+    # Verify depot is first and last
+    if route_cities[0] != DEPOT_CITY or route_cities[-1] != DEPOT_CITY:
+        st.warning("Warning: Route does not start and end at the depot!")
