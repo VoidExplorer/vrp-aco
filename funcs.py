@@ -161,16 +161,37 @@ class AntColonyOptimizer:
         self.beta = beta
         self.rho = rho
         self.num_cities = distance_matrix.shape[0]
-        # Find the index of City_61 in the cities list
         self.depot = 61  # This should match the index of City_61 in your cities list
+        self.orders_data = None  # Will store order information for deadline calculations
 
-    def _get_penalty(self, city_idx):
-        if self.metadata is None or city_idx not in self.metadata.index:
-            return 1.0
-        urgency = self.metadata.loc[city_idx, 'Urgency']
-        weight = self.metadata.loc[city_idx, 'Weight']
-        penalty = (1.0 / (urgency + 1e-3)) + (weight / 1e7)
-        return penalty
+    def set_orders_data(self, orders_data):
+        """Set the orders data for deadline calculations"""
+        self.orders_data = orders_data
+
+    def _get_heuristic_value(self, current_city, next_city):
+        """Calculate heuristic value based on distance (70%) and deadline (30%)"""
+        # Distance component (70%)
+        dist = self.distances[current_city][next_city]
+        heuristic_dist = 1.0 / (dist + 1e-5)  # Avoid division by zero
+        
+        # Deadline component (30%)
+        heuristic_urgency = 1.0
+        if self.orders_data is not None:
+            # Find orders that have this city as source or destination
+            relevant_orders = [order for order in self.orders_data 
+                             if order['Source'] == next_city or order['Destination'] == next_city]
+            
+            if relevant_orders:
+                # Calculate minimum time until deadline
+                current_time = pd.Timestamp.now()
+                time_until_deadline = min(
+                    (pd.Timestamp(order['Deadline']) - current_time).total_seconds()
+                    for order in relevant_orders
+                )
+                heuristic_urgency = 1.0 / (time_until_deadline + 1.0) if time_until_deadline > 0 else 1000.0
+        
+        # Combine with 70-30 split
+        return (heuristic_dist * 0.7) + (heuristic_urgency * 0.3)
 
     def _calculate_probabilities(self, current_city, visited):
         # Only allow visiting the depot at the start and end
@@ -183,9 +204,8 @@ class AntColonyOptimizer:
 
         for j in allowed:
             tau = self.pheromones[current_city][j] ** self.alpha
-            eta = (1.0 / self.distances[current_city][j]) ** self.beta
-            penalty = self._get_penalty(j)
-            probs[j] = tau * eta * penalty
+            eta = self._get_heuristic_value(current_city, j) ** self.beta
+            probs[j] = tau * eta
 
         total = np.sum(probs)
         return probs / total if total > 0 else np.ones(self.num_cities) / self.num_cities
@@ -261,6 +281,9 @@ def run_vrp(data, num_ants=30, num_iterations=200, alpha=1.0, beta=2.0, rho=0.5)
         beta=beta,
         rho=rho
     )
+    
+    # Set the orders data for deadline calculations
+    optimizer.set_orders_data(data.orders_processed.to_dict('records'))
     
     # Set the depot index
     optimizer.depot = depot_idx
